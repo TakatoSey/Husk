@@ -6,8 +6,7 @@ on:
     branches: [main]
     paths:
       - 'src/**'
-      - 'scripts/package_ipa.sh'
-      - 'scripts/stage_release_dependencies.py'
+      - 'scripts/**'
       - 'tests/translation-layer/test_apk_order.py'
       - '.github/workflows/build-ipa.yml'
 
@@ -19,7 +18,46 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Extract Android runtime from pinned Lineage image
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-utils e2fsprogs
+          mkdir -p build/runtime-source
+          curl --fail --location --retry 3 --output build/vda.qcow2 \
+            https://github.com/Leviidev/Husk/releases/download/lineage-v2/vda-v12.qcow2
+          echo 'a8dbaecc8fdcd682991b078d6bbb7df6972e459208634fa8dcbad24f17208d6a  build/vda.qcow2' | sha256sum --check
+          qemu-img convert -O raw build/vda.qcow2 build/vda.raw
+          python3 scripts/extract_android_runtime.py build/vda.raw build/runtime-source
+      - name: Build Java framework and stage runtime
+        run: |
+          curl --fail --location --retry 3 --output build/r8.jar \
+            https://storage.googleapis.com/r8-releases/raw/8.5.35/r8.jar
+          HUSK_JDK="$JAVA_HOME" HUSK_D8="$PWD/build/r8.jar" \
+            HTTP_LEGACY="$PWD/build/runtime-source/org.apache.http.legacy.jar" \
+            FRAMEWORK_RES="$PWD/build/runtime-source/framework-res.apk" \
+            bash scripts/build_java_runtime.sh "$PWD/build/runtime-source/apex"
+          cp -R build/runtime-source/android-system build/android-system
+          python3 scripts/validate_android_runtime.py build
+      - name: Upload runtime data
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-runtime
+          path: |
+            build/java-runtime
+            build/android-system
+          if-no-files-found: error
+          retention-days: 14
   build:
+    needs: runtime
     runs-on: xcode-27
     timeout-minutes: 90
     env:
@@ -42,6 +80,11 @@ jobs:
           python3 scripts/stage_release_dependencies.py build/bootstrap/Husk.ipa
           xcodebuild -create-xcframework -framework "$PWD/build/bootstrap/MoltenVK.framework" \
             -output "$PWD/build/ios-arm64/lib/MoltenVK.xcframework"
+      - name: Download Android runtime data
+        uses: actions/download-artifact@v4
+        with:
+          name: android-runtime
+          path: build
       - name: Build pairing library
         run: bash scripts/build_rppairing_ios.sh
       - name: Build app and package IPA
