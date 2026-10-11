@@ -1,0 +1,62 @@
+name: Build IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'scripts/package_ipa.sh'
+      - 'scripts/stage_release_dependencies.py'
+      - 'tests/translation-layer/test_apk_order.py'
+      - '.github/workflows/build-ipa.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 90
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      DD: ${{ runner.temp }}/husk_ipa
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test base APK selection
+        run: python3 tests/translation-layer/test_apk_order.py
+      - name: Install build tools
+        run: |
+          brew install xcodegen qemu
+          rustup target add aarch64-apple-ios
+      - name: Stage upstream binary dependencies
+        run: |
+          mkdir -p build/bootstrap
+          curl --fail --location --retry 3 --output build/bootstrap/Husk.ipa \
+            https://github.com/Leviidev/Husk/releases/download/1.1.0/Husk.ipa
+          python3 scripts/stage_release_dependencies.py build/bootstrap/Husk.ipa
+          xcodebuild -create-xcframework -framework "$PWD/build/bootstrap/MoltenVK.framework" \
+            -output "$PWD/build/ios-arm64/lib/MoltenVK.xcframework"
+      - name: Build pairing library
+        run: bash scripts/build_rppairing_ios.sh
+      - name: Build app and package IPA
+        run: bash scripts/package_ipa.sh "$PWD/build/Husk.ipa"
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Husk-IPA-${{ github.sha }}
+          path: build/Husk.ipa
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Husk-build-log-${{ github.sha }}
+          path: ${{ runner.temp }}/husk_ipa/build.log
+          if-no-files-found: ignore
+          retention-days: 14
