@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 90
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
-      DD: ${{ runner.temp }}/husk_ipa
+      DD: /tmp/husk_ipa
     steps:
       - uses: actions/checkout@v4
       - name: Test base APK selection
@@ -57,6 +57,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Husk-build-log-${{ github.sha }}
-          path: ${{ runner.temp }}/husk_ipa/build.log
+          path: /tmp/husk_ipa/build.log
           if-no-files-found: ignore
           retention-days: 14
