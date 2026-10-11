@@ -8,6 +8,7 @@ on:
       - 'src/**'
       - 'scripts/**'
       - 'tests/translation-layer/test_apk_order.py'
+      - 'tests/java-framework/**'
       - '.github/workflows/build-ipa.yml'
 
 permissions:
@@ -27,6 +28,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Test Java view hierarchy
+        run: python3 tests/java-framework/run.py
       - name: Extract Android runtime from pinned Lineage image
         run: |
           sudo apt-get update

@@ -142,8 +142,10 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
     private void addViewInner(View child, int index, LayoutParams p, boolean preventRequestLayout) {
         if (child.mParent != null) throw new IllegalStateException("The specified child already has a parent. You must call removeView() on the child's parent first.");
         if (!checkLayoutParams(p)) p = generateLayoutParams(p);
-        child.mLayoutParams = p;
-        if (!preventRequestLayout) child.forceLayout();
+        // Normal insertion must dispatch the overridable setter: EpoxyRecyclerView initializes its layout manager there.
+        // Android only bypasses it for addViewInLayout(..., preventRequestLayout=true).
+        if (preventRequestLayout) child.mLayoutParams = p;
+        else child.setLayoutParams(p);
         if (index < 0 || index > mChildrenCount) index = mChildrenCount;
         if (mChildrenCount == mChildren.length) mChildren = java.util.Arrays.copyOf(mChildren, mChildrenCount * 2 + 4);
         System.arraycopy(mChildren, index, mChildren, index + 1, mChildrenCount - index);
