@@ -79,7 +79,7 @@ jobs:
         run: |
           mkdir -p build/bootstrap
           curl --fail --location --retry 3 --output build/bootstrap/Husk.ipa \
-            https://github.com/Leviidev/Husk/releases/download/1.1.0/Husk.ipa
+            https://github.com/Leviidev/Husk/releases/download/2.0/Husk.ipa
           python3 scripts/stage_release_dependencies.py build/bootstrap/Husk.ipa
           xcodebuild -create-xcframework -framework "$PWD/build/bootstrap/MoltenVK.framework" \
             -output "$PWD/build/ios-arm64/lib/MoltenVK.xcframework"

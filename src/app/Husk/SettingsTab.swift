@@ -665,6 +665,7 @@ struct SavedMachineSettings: View {
 struct AppearanceSettings: View {
     @State private var appIcon = HuskAppIcon.current
     @AppStorage(Theme.Appearance.key) private var appearance = Theme.Appearance.system
+    @AppStorage(Holiday.key) private var holiday = true
     @ObservedObject private var theme = AppTheme.shared
     @Environment(\.colorScheme) private var scheme
     @State private var custom: Color = AppTheme.shared.accentColor
@@ -681,6 +682,7 @@ struct AppearanceSettings: View {
                 .onChange(of: appearance) { v in
                     HuskLog.log("ui", "appearance: \(v.rawValue)")
                 }
+                Toggle("Holiday Decorations", isOn: $holiday)
             } header: {
                 Text("Theme")
             } footer: {
@@ -807,6 +809,9 @@ struct AboutSettings: View {
                 if devInfo {
                     NavigationLink { TLChecksView() } label: {
                         Label("Device Checks", systemImage: "stethoscope")
+                    }
+                    NavigationLink { MassTestView() } label: {
+                        Label("Mass Test", systemImage: "square.stack.3d.down.forward")
                     }
                 }
                 Button { showLogs = true } label: {

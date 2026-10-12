@@ -13,6 +13,7 @@
 #include <signal.h>
 #include <stdarg.h>
 #include <dlfcn.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -70,6 +71,9 @@ static void on_crash(int sig, siginfo_t *info, void *uctx)
 {
     ucontext_t *uc = uctx;
     _STRUCT_ARM_THREAD_STATE64 *ss = &uc->uc_mcontext->__ss;
+    /* one report: a second thread faulting meanwhile (often the same bug) waits for the first to end the process */
+    static atomic_flag reporting = ATOMIC_FLAG_INIT;
+    if (atomic_flag_test_and_set(&reporting)) for (;;) pause();
     char tn[32] = ""; pthread_getname_np(pthread_self(), tn, sizeof(tn));
     fprintf(stderr, "\n=== CRASH: signal %d, fault address %p, thread '%s' ===\n", sig, info->si_addr, tn);
     describe("pc", (void *)ss->__pc);
@@ -91,6 +95,7 @@ static void on_crash(int sig, siginfo_t *info, void *uctx)
     for (int i = 0; i < 29; i += 4)
         fprintf(stderr, "  x%d=%#llx x%d=%#llx x%d=%#llx x%d=%#llx\n", i, ss->__x[i], i + 1, ss->__x[i + 1], i + 2, i + 2 < 29 ? ss->__x[i + 2] : 0, i + 3, i + 3 < 29 ? ss->__x[i + 3] : 0);
     fprintf(stderr, "  sp=%#llx fp=%#llx\n", ss->__sp, ss->__fp);
+    { void tl_dvm_print_stack(FILE *, int); tl_dvm_print_stack(stderr, 24); }
     fflush(stderr);
     _exit(139);
 }
@@ -206,6 +211,8 @@ static void *run(void *p)
         for (int i = 0; i < n; i++) if (i != bi) { char sp[1400]; snprintf(sp, sizeof(sp), "%s/%s", apk, names[i]); tl_ld_queue_split(sp); fprintf(stderr, "javaapp: split %s\n", names[i]); }
         apk = base;
     }
+    /* no size given: the screen turned the way the manifest asks, as the app turns it before starting a landscape game */
+    if (argc <= 4) { int tl_manifest_orientation(const char *); if (tl_manifest_orientation(apk) == 0) { int t = w; w = h; h = t; fprintf(stderr, "javaapp: landscape (the manifest asks for it)\n"); } }
     if (getenv("TL_SPLITS")) { char *l = strdup(getenv("TL_SPLITS")); for (char *t = strtok(l, ":"); t; t = strtok(NULL, ":")) tl_ld_queue_split(t); }
     tl_javaapp_config cfg = { .apk_path = apk, .data_dir = tmp, .package_name = getenv("TL_PACKAGE"), .width = w, .height = h, .density = 2.625f,
                               .angle_egl = getenv("TL_ANGLE_EGL") ? getenv("TL_ANGLE_EGL") : egl, .angle_gles = getenv("TL_ANGLE_GLES") ? getenv("TL_ANGLE_GLES") : gles,

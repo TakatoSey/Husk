@@ -65,14 +65,17 @@ extension TLReport {
         if engine == "Minecraft" { return .minecraft }
         // SDL games run their own Java activity on the Java runtime: many prepare their data there first (Wesnoth unpacks it, OpenTTD
         // and Luanti copy theirs, launchers come before the game) and SDLActivity's Java drives the native side as on a phone.
-        // python-for-android's bootstrap still goes through the SDL driver.
-        if engine == "SDL" { return .java }
-        if engine == "Python" { return .sdl }
+        // python-for-android (Kivy) too: pyjnius needs real Java (proxies, string identity), which only the Java runtime has.
+        // Except Direct3D ports drawing through DXVK (GTA V): they need Vulkan on a Metal layer of their own, which only the SDL driver gives.
+        if engine == "SDL", libraries.contains(where: { $0.name.hasPrefix("libdxvk") }) { return .sdl }
+        if engine == "SDL" || engine == "Python" { return .java }
         if engine == "Unreal Engine" { return .ue4 }
         if engine == "Rockstar" { return .gta }
         if engine == "Godot" { return .godot }
         if engine == "NativeActivity" { return .nativeactivity }
-        if engine == "Flutter" { return .flutter }
+        // Flutter apps too: their plugins are Java (storage, paths, keystore, SQLite) and run there for real, where the Flutter
+        // driver could only answer a few channels itself (Lichess waited forever, Sanmill failed on one).
+        if engine == "Flutter" { return .java }
         if engine == "GameMaker" { return .gamemaker }
         // Everything else with Java code: libGDX games, ordinary apps, React Native and the like, and games whose engine is their
         // own library behind a Java activity (Hill Climb Racing, Supercell's games)
@@ -87,7 +90,7 @@ extension TLReport {
     var runsOnNativeRuntime: Bool { nativeEngine != nil }
 
     /// "Unity" or "Cocos2d-x", for words on screen.
-    var nativeEngineName: String { engine == "Python" ? "Python (Kivy)" : nativeEngine == .cocos ? "Cocos2d-x" : nativeEngine == .minecraft ? "Minecraft" : nativeEngine == .sdl ? "SDL" : nativeEngine == .ue4 ? "Unreal Engine" : nativeEngine == .gta ? "Rockstar" : nativeEngine == .godot ? "Godot" : nativeEngine == .nativeactivity ? "NativeActivity" : nativeEngine == .flutter ? "Flutter" : nativeEngine == .gamemaker ? "GameMaker" : nativeEngine == .java ? (engine == "libGDX" ? "libGDX" : engine == "SDL" ? "SDL" : "Android") : "Unity" }
+    var nativeEngineName: String { engine == "Python" ? "Python (Kivy)" : nativeEngine == .cocos ? "Cocos2d-x" : nativeEngine == .minecraft ? "Minecraft" : nativeEngine == .sdl ? "SDL" : nativeEngine == .ue4 ? "Unreal Engine" : nativeEngine == .gta ? "Rockstar" : nativeEngine == .godot ? "Godot" : nativeEngine == .nativeactivity ? "NativeActivity" : nativeEngine == .flutter ? "Flutter" : nativeEngine == .gamemaker ? "GameMaker" : nativeEngine == .java ? (engine == "libGDX" ? "libGDX" : engine == "SDL" ? "SDL" : engine == "Flutter" ? "Flutter" : "Android") : "Unity" }
 
     var displaySummary: String {
         guard runsOnNativeRuntime else { return summary }
@@ -263,6 +266,16 @@ final class TranslationLayerStore: ObservableObject {
 
     /// Keep a copy of one app -- one APK, or a base APK and its splits,
     /// picked together -- and report on it.
+    /// One app's APKs (a base and its splits, or a bundle) copied in (the originals stay where they are), and the new app's folder name: the developer mass test takes its APKs
+    /// from a folder of the user's this way, one per launch of Husk.
+    nonisolated static func importCopy(_ urls: [URL]) -> String? {
+        let fm = FileManager.default
+        let before = Set((try? fm.contentsOfDirectory(atPath: TranslationLayer.root.path)) ?? [])
+        guard !urls.isEmpty, ingest(urls, move: false) == nil else { return nil }
+        let after = Set((try? fm.contentsOfDirectory(atPath: TranslationLayer.root.path)) ?? [])
+        return after.subtracting(before).first
+    }
+
     func add(_ urls: [URL], move: Bool = false) {
         guard !urls.isEmpty, busy == nil else { return }
         busy = urls.count == 1 ? "Adding \(urls[0].lastPathComponent)…"

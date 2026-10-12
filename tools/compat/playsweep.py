@@ -12,11 +12,10 @@ import argparse, glob, json, os, re, subprocess, sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 BIN = '/Volumes/GTAV/husk2/bin'
-JAVA = '/Volumes/GTAV/husk2/java/javaapp-test'
+JAVA = os.environ.get('HUSK_JAVAAPP', '/Volumes/GTAV/husk2/java/javaapp-test')
 SCAN = '/Volumes/GTAV/husk2/tl-scan'
 # the harness of the driver the app picks for each engine (TranslationLayer.swift's nativeEngine)
-NATIVE = {'Unity (IL2CPP)': 'unity-test', 'Unity': 'unity-test', 'Unity (Mono)': 'unity-test', 'Flutter': 'flutter-test',
-          'Cocos': 'cocos-test', 'Python': 'sdl-test', 'Godot': 'godot-test', 'GameMaker': 'gamemaker-test',
+NATIVE = {'Unity (IL2CPP)': 'unity-test', 'Unity': 'unity-test', 'Unity (Mono)': 'unity-test',           'Cocos': 'cocos-test', 'Godot': 'godot-test', 'GameMaker': 'gamemaker-test',
           'NativeActivity': 'ue-test', 'Unreal Engine': 'ue-test', 'Rockstar': 'gta-test', 'Minecraft': 'ga-test'}
 # harnesses that take a screenshot when told to (TL_CTL), rather than leaving frames in a folder
 
@@ -90,7 +89,7 @@ def main():
             if bmps and not os.path.exists(shot): subprocess.run(['sips', '-s', 'format', 'png', bmps[-1], '--out', shot], capture_output=True)
             subprocess.run(['rm', '-rf', fm.group(1)])
         dm = re.search(r'^data: (\S+)', text, re.M)
-        if dm and dm.group(1).startswith('/Volumes/GTAV/husk2/tmp/'): subprocess.run(['rm', '-rf', dm.group(1)])
+        if dm and dm.group(1).startswith('/Volumes/GTAV/husk2/tmp/'): subprocess.run(['chmod', '-R', 'u+w', dm.group(1)], capture_output=True); subprocess.run(['rm', '-rf', dm.group(1)])
         row = {'pkg': pkg, 'engine': engine or 'Java', 'harness': harness, 'rc': rc}
         row.update(summarise(text))
         rows.append(row)

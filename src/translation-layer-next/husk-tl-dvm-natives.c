@@ -182,6 +182,9 @@ NAT(String_intern)
     pthread_mutex_unlock(&g_intern_lock);
     return true;
 }
+/* The canonical copy of a string (String.intern): every string literal goes through here, so equal literals are one object across
+ * classes and dex files, as Java promises -- code compares them with == (p4a's AssetExtract: method == "private"). */
+jobj *dvm_intern(jobj *s) { jvalue r; if (!s || !String_intern(s, NULL, &r) || !r.l) return s; return r.l; }
 NAT(String_toCharArray)
 {
     (void)a;
@@ -973,12 +976,21 @@ NAT(Class_getInterfacesInternal)
     *ret = L(n ? arr : NULL);
     return true;
 }
+/* ART's refusal to make an object of an abstract class or an interface (reflection and Unsafe alike): a library that tries, as JSON
+ * mappers do on their way to the right subclass, gets InstantiationException and goes on, rather than an object whose abstract
+ * methods throw AbstractMethodError later */
+static bool abstract_refused(dvm_class *c, const char *name)
+{
+    if (c && (c->flags & (0x400 | 0x200)) && !c->prim && !c->elem) { dvm_throw("java/lang/InstantiationException", "Can't instantiate %s %s", c->flags & 0x200 ? "interface" : "abstract class", name); return true; }
+    return false;
+}
 NAT(Class_newInstance)
 {
     (void)a;
     tl_jclass *jc = self->klass.jc;
     dvm_class *c = dvm_class_of(jc);
     if (!c) return dvm_throw("java/lang/InstantiationException", "%s", jc->name);
+    if (abstract_refused(c, jc->name)) return false;
     if (!dvm_ensure_init(c)) return false;
     dvm_method *init = dvm_find_method(c, "<init>", "()V", false);
     if (!init || init->cls != c) return dvm_throw("java/lang/InstantiationException", "%s has no zero-argument constructor", jc->name);
@@ -1083,9 +1095,8 @@ static jvalue *field_place(dvm_field *f, jobj *obj)
         dvm_throw("java/lang/IllegalArgumentException", "Expected receiver of type %s, but got %s", f->cls->name, dvm_object_class(obj)->name);
         return NULL;
     }
-    jvalue *sl = dvm_slots(obj);
-    if (f->slot >= obj->nfields) { jvalue *dvm_grow_slots(jobj *, uint32_t); sl = dvm_grow_slots(obj, f->slot + 1); }
-    return &sl[f->slot];
+    jvalue *dvm_slots_for(jobj *, uint32_t);
+    return &dvm_slots_for(obj, f->slot)[f->slot];
 }
 NAT(Field_getInt) { dvm_field *f = field_of(self); jvalue *p = field_place(f, a[0].l); if (!p) return tl_jni_pending() ? false : npe("object"); *ret = I(p->i); return true; }
 NAT(Field_getLong) { dvm_field *f = field_of(self); jvalue *p = field_place(f, a[0].l); if (!p) return tl_jni_pending() ? false : npe("object"); *ret = J(p->j); return true; }
@@ -1470,6 +1481,7 @@ NAT(Ctor_newInstance0)
     dvm_method *m = method_of(self);
     if (!m) return npe("constructor");
     jvalue args[64];
+    if (abstract_refused(m->cls, m->cls->name)) return false;
     if (!unbox_args(m, a[0].l, args)) return false;
     if (!dvm_ensure_init(m->cls)) return false;
     jobj *o = dvm_new_object(m->cls->jc); dvm_slots(o);
@@ -1540,27 +1552,25 @@ static jvalue *unsafe_place(jobj *o, int64_t off, int size)
         /* a static field of the class it stands for */
         if (off >= STATIC_OFFSET) return &o->klass.jc->statics[(off - STATIC_OFFSET - 16) / 8];
         /* else a field of the Class object itself; fields and methods are ART's member tables, kept current */
-        jvalue *slots = dvm_slots(o);
         static dvm_field *fields, *methods;
         dvm_class *cc = dvm_class_of(tl_jni_class("java/lang/Class"));
         if (!fields && cc) { fields = dvm_find_field(cc, "fields", false); methods = dvm_find_field(cc, "methods", false); }
         int slot = (int)((off - 16) / 8);
-        if (slot < 0 || (uint32_t)slot >= o->nfields) { jvalue *dvm_grow_slots(jobj *, uint32_t); tl_log_line("dvm: Unsafe offset %lld past a Class object's %u fields", (long long)off, o->nfields); slots = dvm_grow_slots(o, (uint32_t)(slot < 0 ? 0 : slot) + 1); }
+        jvalue *dvm_slots_for(jobj *, uint32_t);
+        jvalue *slots = dvm_slots_for(o, (uint32_t)(slot < 0 ? 0 : slot));
         dvm_class *c = dvm_class_of(o->klass.jc);
         if (c && c->art_tables && fields && slot == (int)fields->slot) slots[slot].j = (int64_t)(uintptr_t)((uint8_t *)c->inf - DVM_MEMBERS_HDR);
         if (c && c->art_tables && methods && slot == (int)methods->slot) slots[slot].j = (int64_t)(uintptr_t)((uint8_t *)c->dm - DVM_MEMBERS_HDR);
         return &slots[slot];
     }
     (void)size;
-    jvalue *sl = dvm_slots(o);
     int64_t slot = (off - 16) / 8;
-    if (slot < 0 || (uint64_t)slot >= o->nfields) {
-        jvalue *dvm_grow_slots(jobj *, uint32_t);
+    if (slot < 0 || slot > 4096) {
         tl_log_line("dvm: Unsafe offset %lld past a %s's %u fields", (long long)off, o->cls ? o->cls->name : "?", o->nfields);
-        if (slot < 0 || slot > 4096) { static jvalue junk; junk.j = 0; return &junk; }
-        sl = dvm_grow_slots(o, (uint32_t)slot + 1);
+        static jvalue junk; junk.j = 0; return &junk;
     }
-    return &sl[slot];
+    jvalue *dvm_slots_for(jobj *, uint32_t);
+    return &dvm_slots_for(o, (uint32_t)slot)[slot];
 }
 NAT(U_objectFieldOffset)
 {
@@ -1647,6 +1657,7 @@ NAT(U_allocateInstance)
     (void)self;
     jobj *cls = a[0].l;
     if (!cls) return npe("class");
+    if (abstract_refused(dvm_class_of(cls->klass.jc), cls->klass.jc->name)) return false;
     jobj *o = dvm_new_object(cls->klass.jc); dvm_slots(o);
     *ret = L(o);
     return true;

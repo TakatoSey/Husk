@@ -13,13 +13,13 @@ import sys
 import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SHA256 = "f2044fea5b5f8287deffa0466f5f71bfd915fc4ee0d1cb852b10b0242c6ca949"
+SHA256 = "55ca8a6a8a9194759be578ef340553372a4427257093c659d5dc3b2971d722e7"
 
 
 def stage(ipa):
     with open(ipa, "rb") as stream:
         if hashlib.file_digest(stream, "sha256").hexdigest() != SHA256:
-            raise ValueError("Upstream Husk 1.1.0 IPA checksum mismatch")
+            raise ValueError("Upstream Husk 2.0.0 IPA checksum mismatch")
     with zipfile.ZipFile(ipa) as archive:
         prefix = "Payload/Husk.app/"
 
@@ -54,7 +54,7 @@ def stage(ipa):
         for folder in ("android-system", "java-runtime"):
             if not (ROOT / "build" / folder).is_dir():
                 print(f"WARNING: upstream IPA has no {folder}; this build does not supply that optional runtime data")
-    print("Staged dependencies from upstream Husk 1.1.0 (SHA-256 verified)")
+    print("Staged dependencies from upstream Husk 2.0.0 (SHA-256 verified)")
 
 
 if __name__ == "__main__":
