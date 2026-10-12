@@ -58,6 +58,48 @@ static void *obj_host(void *g, void *(*make)(uint32_t value))
 
 static int rc(int darwin) { return darwin ? tl_errno_to_guest(darwin) : 0; }
 
+static _Thread_local struct {
+    bool enabled;
+    uint64_t since, total, longest;
+    unsigned long count;
+    const char *kind;
+    const void *caller, *object;
+    int result;
+} wait_perf;
+
+void tl_wait_profile_enable(void) { wait_perf.enabled = true; }
+uint64_t tl_wait_profile_begin(void)
+{
+    if (!wait_perf.enabled) return 0;
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec;
+}
+void tl_wait_profile_end(const char *kind, const void *caller, const void *object, uint64_t start, int result)
+{
+    if (!start) return;
+    int saved_errno = errno;
+    uint64_t now = tl_wait_profile_begin(), ns = now - start;
+    if (!wait_perf.since) wait_perf.since = start;
+    wait_perf.total += ns;
+    wait_perf.count++;
+    if (ns > wait_perf.longest) {
+        wait_perf.longest = ns; wait_perf.kind = kind;
+        wait_perf.caller = caller; wait_perf.object = object; wait_perf.result = result;
+    }
+    if (now - wait_perf.since < 3000000000ull) { errno = saved_errno; return; }
+    if (wait_perf.longest >= 10000000ull) {
+        tl_lib *lib = tl_ld_lib_of(wait_perf.caller);
+        uintptr_t offset = lib ? (uintptr_t)wait_perf.caller - (uintptr_t)tl_ld_lib_base(lib) : 0;
+        tl_log_line("unity: waits: %.1f ms across %lu calls in %.2f s; longest %s %.2f ms, result %d, object %p, caller %s+%#lx",
+                    wait_perf.total / 1e6, wait_perf.count, (now - wait_perf.since) / 1e9,
+                    wait_perf.kind, wait_perf.longest / 1e6, wait_perf.result, wait_perf.object,
+                    lib ? tl_ld_lib_name(lib) : "host", (unsigned long)offset);
+    }
+    wait_perf.since = now; wait_perf.total = 0; wait_perf.longest = 0; wait_perf.count = 0;
+    errno = saved_errno;
+}
+
 /* ---------------------------------------------------------------- mutexes */
 
 /* bionic types: NORMAL 0, RECURSIVE 1, ERRORCHECK 2. Darwin's: NORMAL 0, ERRORCHECK 1, RECURSIVE 2. */
@@ -107,7 +149,12 @@ static void describe_site(char *out, size_t n, uint64_t addr)
 static int b_mutex_lock(void *g)
 {
     pthread_mutex_t *m = obj_host(g, make_mutex);
-    if (!mutex_trace()) return rc(pthread_mutex_lock(m));
+    if (!mutex_trace()) {
+        uint64_t start = tl_wait_profile_begin();
+        int r = pthread_mutex_lock(m);
+        tl_wait_profile_end("mutex", __builtin_return_address(0), g, start, r);
+        return rc(r);
+    }
     void *lr = __builtin_return_address(0);
     for (long i = 0;; i++) {
         int r = pthread_mutex_trylock(m);
@@ -169,7 +216,10 @@ static int b_cond_signal(void *g)    { return rc(pthread_cond_signal(obj_host(g,
 static int b_cond_broadcast(void *g) { return rc(pthread_cond_broadcast(obj_host(g, make_cond))); }
 static int b_cond_wait(void *g, void *m)
 {
-    return rc(pthread_cond_wait(obj_host(g, make_cond), obj_host(m, make_mutex)));
+    uint64_t start = tl_wait_profile_begin();
+    int r = pthread_cond_wait(obj_host(g, make_cond), obj_host(m, make_mutex));
+    tl_wait_profile_end("cond", __builtin_return_address(0), g, start, r);
+    return rc(r);
 }
 
 static int b_cond_timedwait(void *g, void *m, const struct timespec *abs)
@@ -183,11 +233,14 @@ static int b_cond_timedwait(void *g, void *m, const struct timespec *abs)
     rel.tv_nsec = abs->tv_nsec - now.tv_nsec;
     if (rel.tv_nsec < 0) { rel.tv_sec--; rel.tv_nsec += 1000000000L; }
     if (rel.tv_sec < 0) { rel.tv_sec = 0; rel.tv_nsec = 0; }
-    return rc(pthread_cond_timedwait_relative_np(o->host, obj_host(m, make_mutex), &rel));
+    uint64_t start = tl_wait_profile_begin();
+    int r = pthread_cond_timedwait_relative_np(o->host, obj_host(m, make_mutex), &rel);
+    tl_wait_profile_end("cond_timed", __builtin_return_address(0), g, start, r);
+    return rc(r);
 }
 
 /* Bionic's clock ids: 0 is CLOCK_REALTIME, 1 CLOCK_MONOTONIC. */
-static int cond_wait_until(void *g, void *m, clockid_t clk, const struct timespec *abs)
+static int cond_wait_until(void *g, void *m, clockid_t clk, const struct timespec *abs, const void *caller)
 {
     guest_obj *o = g;
     obj_host(g, make_cond);
@@ -197,16 +250,19 @@ static int cond_wait_until(void *g, void *m, clockid_t clk, const struct timespe
     rel.tv_nsec = abs->tv_nsec - now.tv_nsec;
     if (rel.tv_nsec < 0) { rel.tv_sec--; rel.tv_nsec += 1000000000L; }
     if (rel.tv_sec < 0) { rel.tv_sec = 0; rel.tv_nsec = 0; }
-    return rc(pthread_cond_timedwait_relative_np(o->host, obj_host(m, make_mutex), &rel));
+    uint64_t start = tl_wait_profile_begin();
+    int r = pthread_cond_timedwait_relative_np(o->host, obj_host(m, make_mutex), &rel);
+    tl_wait_profile_end("cond_timed", caller, g, start, r);
+    return rc(r);
 }
 
 static int b_cond_clockwait(void *g, void *m, int clock, const struct timespec *abs)
 {
     if (clock != 0 && clock != 1) return 22;
-    return cond_wait_until(g, m, clock == 1 ? CLOCK_MONOTONIC : CLOCK_REALTIME, abs);
+    return cond_wait_until(g, m, clock == 1 ? CLOCK_MONOTONIC : CLOCK_REALTIME, abs, __builtin_return_address(0));
 }
 
-static int b_cond_timedwait_monotonic(void *g, void *m, const struct timespec *abs) { return cond_wait_until(g, m, CLOCK_MONOTONIC, abs); }
+static int b_cond_timedwait_monotonic(void *g, void *m, const struct timespec *abs) { return cond_wait_until(g, m, CLOCK_MONOTONIC, abs, __builtin_return_address(0)); }
 
 static int b_condattr_init(long *a)    { *a = 0; return 0; }
 static int b_condattr_destroy(long *a) { (void)a; return 0; }
@@ -290,10 +346,12 @@ static int b_sem_post(void *g)
 static int b_sem_wait(void *g)
 {
     host_sem *s = hs(g);
+    uint64_t start = tl_wait_profile_begin();
     pthread_mutex_lock(&s->m);
     while (s->count <= 0) pthread_cond_wait(&s->c, &s->m);
     s->count--;
     pthread_mutex_unlock(&s->m);
+    tl_wait_profile_end("sem", __builtin_return_address(0), g, start, 0);
     return 0;
 }
 static int b_sem_trywait(void *g)
@@ -309,6 +367,7 @@ static int b_sem_trywait(void *g)
 static int b_sem_timedwait(void *g, const struct timespec *abs)
 {
     host_sem *s = hs(g);
+    uint64_t start = tl_wait_profile_begin();
     struct timespec now, rel;
     clock_gettime(CLOCK_REALTIME, &now);
     rel.tv_sec = abs->tv_sec - now.tv_sec;
@@ -320,6 +379,7 @@ static int b_sem_timedwait(void *g, const struct timespec *abs)
     while (s->count <= 0 && r == 0) r = pthread_cond_timedwait_relative_np(&s->c, &s->m, &rel);
     if (r == 0) s->count--;
     pthread_mutex_unlock(&s->m);
+    tl_wait_profile_end("sem_timed", __builtin_return_address(0), g, start, r);
     if (r) { tl_set_guest_errno(tl_errno_to_guest(r)); return -1; }
     return 0;
 }

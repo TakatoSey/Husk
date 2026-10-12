@@ -1259,8 +1259,20 @@ static int b_gettimeofday(int64_t *tv, void *tz)
     if (tv) { tv[0] = t.tv_sec; tv[1] = t.tv_usec; }
     return 0;
 }
-static int b_nanosleep(const struct timespec *req, struct timespec *rem) { TL_ERRNO_BEGIN(); int r = nanosleep(req, rem); TL_ERRNO_END(); return r; }
-static int b_usleep(unsigned us) { return usleep(us); }
+static int b_nanosleep(const struct timespec *req, struct timespec *rem)
+{
+    uint64_t start = tl_wait_profile_begin();
+    TL_ERRNO_BEGIN(); int r = nanosleep(req, rem); TL_ERRNO_END();
+    tl_wait_profile_end("nanosleep", __builtin_return_address(0), NULL, start, r);
+    return r;
+}
+static int b_usleep(unsigned us)
+{
+    uint64_t start = tl_wait_profile_begin();
+    int r = usleep(us);
+    tl_wait_profile_end("usleep", __builtin_return_address(0), NULL, start, r);
+    return r;
+}
 /* clock_nanosleep: relative, or until a time on the clock (TIMER_ABSTIME); returns the error, as POSIX says. Linux's REALTIME 0,
  * MONOTONIC 1, BOOTTIME 7 (the others are taken as monotonic). */
 static int b_clock_nanosleep(int clock, int flags, const struct timespec *req, struct timespec *rem)
@@ -1273,8 +1285,10 @@ static int b_clock_nanosleep(int clock, int flags, const struct timespec *req, s
         d.tv_sec = ns / 1000000000ll; d.tv_nsec = ns % 1000000000ll;
         rem = NULL;
     }
-    if (nanosleep(&d, rem)) return tl_errno_to_guest(errno);
-    return 0;
+    uint64_t start = tl_wait_profile_begin();
+    int r = nanosleep(&d, rem) ? tl_errno_to_guest(errno) : 0;
+    tl_wait_profile_end("clock_nanosleep", __builtin_return_address(0), NULL, start, r);
+    return r;
 }
 
 /* ---------------------------------------------------------------- signals */
@@ -1475,7 +1489,11 @@ long tl_linux_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long
 {
     static int trace = -1;
     if (trace < 0) trace = getenv("TL_SYSCALL_TRACE") ? 1 : 0;
+    int cmd = (int)a1 & 127;
+    bool waiting = nr == 98 && (cmd == 0 || cmd == 9);
+    uint64_t start = waiting ? tl_wait_profile_begin() : 0;
     long r = linux_syscall_impl(a0, a1, a2, a3, a4, a5, nr);
+    if (waiting) tl_wait_profile_end("futex", __builtin_return_address(0), (void *)a0, start, (int)r);
     if (trace) tl_log_line("syscall %ld(%#lx, %#lx, %#lx) -> %ld", nr, a0, a1, a2, r);
     return r;
 }

@@ -88,6 +88,10 @@ const char *tl_sysprop(const char *name);
 /* The log. */
 void tl_log_line(const char *fmt, ...);
 
+void tl_wait_profile_enable(void);
+uint64_t tl_wait_profile_begin(void);
+void tl_wait_profile_end(const char *kind, const void *caller, const void *object, uint64_t start, int result);
+
 /* A one-line note, once per distinct text, for things that are stubbed. */
 void tl_note_once(const char *what);
 

@@ -110,6 +110,7 @@ static void *unity_main(void *arg)
 {
     (void)arg;
     pthread_setname_np("UnityMain");
+    tl_wait_profile_enable();
     tl_log_line("unity: UnityMain thread started");
 
     /* The jobs UnityPlayer queues for this thread, in the order it queues them. */
@@ -134,7 +135,7 @@ static void *unity_main(void *arg)
     struct timespec report_since;
     clock_gettime(CLOCK_MONOTONIC, &report_since);
     unsigned long samples = 0;
-    unsigned long long render_ns = 0, cpu_ns = 0, max_ns = 0;
+    unsigned long long render_ns = 0, cpu_ns = 0, process_ns = 0, max_ns = 0;
     while (render && !atomic_load(&U.stop)) {
         if (atomic_load(&U.paused)) {
             if (!was_paused) { NATIVE_VOID("nativeFocusChanged", "(Z)V", 0, 0); NATIVE_VOID("nativePause", "()Z", 0, 0); was_paused = true; tl_log_line("unity: paused"); }
@@ -145,19 +146,22 @@ static void *unity_main(void *arg)
             NATIVE_VOID("nativeResume", "()V", 0, 0); NATIVE_VOID("nativeFocusChanged", "(Z)V", 1, 0);
             was_paused = false;
             clock_gettime(CLOCK_MONOTONIC, &report_since);
-            samples = 0; render_ns = 0; cpu_ns = 0; max_ns = 0;
+            samples = 0; render_ns = 0; cpu_ns = 0; process_ns = 0; max_ns = 0;
             tl_log_line("unity: resumed");
         }
-        struct timespec t0, t1, cpu0, cpu1;
+        struct timespec t0, t1, cpu0, cpu1, process0, process1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
         clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu0);
+        clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &process0);
         uint8_t keep = ((uint8_t (*)(void *, void *))render)(tl_jni_env(), U.player);
+        clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &process1);
         clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu1);
         clock_gettime(CLOCK_MONOTONIC, &t1);
         {
             unsigned long long ns = (unsigned long long)((t1.tv_sec - t0.tv_sec) * 1000000000ll + (t1.tv_nsec - t0.tv_nsec));
             render_ns += ns;
             cpu_ns += (cpu1.tv_sec - cpu0.tv_sec) * 1000000000ll + (cpu1.tv_nsec - cpu0.tv_nsec);
+            process_ns += (process1.tv_sec - process0.tv_sec) * 1000000000ll + (process1.tv_nsec - process0.tv_nsec);
             if (ns > max_ns) max_ns = ns;
             samples++;
             atomic_fetch_add(&U.perf_ns, ns);
@@ -167,10 +171,10 @@ static void *unity_main(void *arg)
         }
         double elapsed = (t1.tv_sec - report_since.tv_sec) + (t1.tv_nsec - report_since.tv_nsec) / 1e9;
         if (elapsed >= 3) {
-            tl_log_line("unity: perf: %.1f calls/s, nativeRender %.2f ms avg / %.2f ms max, UnityMain CPU %.2f ms/call",
-                        samples / elapsed, (double)render_ns / samples / 1e6, max_ns / 1e6, (double)cpu_ns / samples / 1e6);
+            tl_log_line("unity: perf: %.1f calls/s, nativeRender %.2f ms avg / %.2f ms max, UnityMain CPU %.2f ms/call, process CPU %.2f ms/call",
+                        samples / elapsed, (double)render_ns / samples / 1e6, max_ns / 1e6, (double)cpu_ns / samples / 1e6, (double)process_ns / samples / 1e6);
             report_since = t1;
-            samples = 0; render_ns = 0; cpu_ns = 0; max_ns = 0;
+            samples = 0; render_ns = 0; cpu_ns = 0; process_ns = 0; max_ns = 0;
         }
         atomic_fetch_add(&U.frames, 1);
         if (!keep) { tl_log_line("unity: nativeRender returned false: the engine asked to quit"); break; }
