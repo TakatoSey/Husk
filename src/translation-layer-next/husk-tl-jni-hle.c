@@ -463,7 +463,9 @@ static void System_loadLibrary(tl_jcall *c)
 static void UnityPlayer_loadLibrary(tl_jcall *c)
 {
     char base[200]; snprintf(base, sizeof(base), "lib%s.so", S(c->args[0].l));
-    c->ret = vz(load_native_library(base));
+    bool loaded = load_native_library(base);
+    if (tl_jni_pending()) { tl_jni_clear(); loaded = false; }
+    c->ret = vz(loaded);
 }
 static void System_getProperty(tl_jcall *c) { const char *k = S(c->args[0].l); const char *v = !strcmp(k, "os.arch") ? "aarch64" : !strcmp(k, "http.agent") ? "Dalvik/2.1.0 (Linux; U; Android 14; Pixel 8)" : NULL; c->ret = vl(v ? STR(v) : NULL); }
 static void System_currentTimeMillis(tl_jcall *c) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); jvalue v; v.j = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000; c->ret = v; }
