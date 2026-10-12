@@ -598,7 +598,7 @@ static void *make_stub(const char *name)
  * the kernel preserves all registers but x0 across a system call, so code around a
  * raw `svc` relies on that -- and calls tl_linux_syscall with the arguments and number.
  */
-long tl_linux_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long nr);
+long tl_linux_syscall_svc(long a0, long a1, long a2, long a3, long a4, long a5, long nr, const uint32_t *stub_return);
 
 __attribute__((naked, used)) void tl_svc_common(void)
 {
@@ -628,7 +628,8 @@ __attribute__((naked, used)) void tl_svc_common(void)
         "stp q28, q29, [sp, #448]\n"
         "stp q30, q31, [sp, #480]\n"
         "mov x6, x8\n"
-        "bl _tl_linux_syscall\n"
+        "ldr x7, [x29, #8]\n"
+        "bl _tl_linux_syscall_svc\n"
         "ldp x1, x2, [sp, #0]\n"
         "ldp x3, x4, [sp, #16]\n"
         "ldp x5, x6, [sp, #32]\n"

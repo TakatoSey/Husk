@@ -1409,7 +1409,14 @@ static int b_raise(int sig) { note_signal("raise", sig); int d = tl_signal_to_da
  * FUTEX_WAIT has been woken for *its* word. So each waiter queues itself with its address and its
  * own condition variable, and a wake picks the matching ones, oldest first.
  */
-typedef struct fut_waiter { uint32_t *addr; bool woken; pthread_cond_t cv; struct fut_waiter *next; } fut_waiter;
+typedef struct fut_waiter {
+    uint32_t *addr;
+    bool woken, profiled;
+    uint64_t wake_ns;
+    char waker[32];
+    pthread_cond_t cv;
+    struct fut_waiter *next;
+} fut_waiter;
 static struct { pthread_mutex_t m; fut_waiter *head, *tail; } g_fut[FUT_BUCKETS] = {
 #define B { PTHREAD_MUTEX_INITIALIZER, NULL, NULL }
 #define B8 B,B,B,B,B,B,B,B
@@ -1446,6 +1453,12 @@ static long futex_call(uint32_t *addr, int op, uint32_t val, const struct timesp
             if (w->addr != addr) continue;
             fut_unlink(h, w);
             w->woken = true;
+            if (w->profiled) {
+                struct timespec t;
+                clock_gettime(CLOCK_MONOTONIC, &t);
+                w->wake_ns = (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec;
+                pthread_getname_np(pthread_self(), w->waker, sizeof(w->waker));
+            }
             pthread_cond_signal(&w->cv);
             woken++;
         }
@@ -1456,7 +1469,8 @@ static long futex_call(uint32_t *addr, int op, uint32_t val, const struct timesp
     if (cmd == 0 || cmd == 9) {                                   /* FUTEX_WAIT / WAIT_BITSET */
         pthread_mutex_lock(&g_fut[h].m);
         if (__atomic_load_n(addr, __ATOMIC_SEQ_CST) != val) { pthread_mutex_unlock(&g_fut[h].m); return -11; }
-        fut_waiter me = { .addr = addr, .woken = false, .cv = PTHREAD_COND_INITIALIZER, .next = NULL };
+        uint64_t start = tl_wait_profile_begin();
+        fut_waiter me = { .addr = addr, .profiled = start != 0, .cv = PTHREAD_COND_INITIALIZER };
         if (g_fut[h].tail) g_fut[h].tail->next = &me; else g_fut[h].head = &me;
         g_fut[h].tail = &me;
         if (g_futex_trace) { char nm[32] = ""; pthread_getname_np(pthread_self(), nm, sizeof(nm)); tl_log_line("futex[%s]: WAIT addr=%p val=%#x", nm, (void *)addr, val); }
@@ -1479,13 +1493,23 @@ static long futex_call(uint32_t *addr, int op, uint32_t val, const struct timesp
         }
         pthread_mutex_unlock(&g_fut[h].m);
         pthread_cond_destroy(&me.cv);
+        if (start && me.wake_ns) {
+            uint64_t now = tl_wait_profile_begin();
+            static _Thread_local uint64_t last_report;
+            if (now - start >= 10000000ull && now - last_report >= 3000000000ull) {
+                tl_log_line("unity: futex: object %p, op %d, %s deadline, woke by '%s' after %.2f ms, resumed %.2f ms after wake",
+                            (void *)addr, cmd, to ? "with" : "no", me.waker,
+                            (me.wake_ns - start) / 1e6, (now - me.wake_ns) / 1e6);
+                last_report = now;
+            }
+        }
         return r;
     }
     return -38;
 }
 
 static long linux_syscall_impl(long a0, long a1, long a2, long a3, long a4, long a5, long nr);
-long tl_linux_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long nr)
+static long syscall_at(long a0, long a1, long a2, long a3, long a4, long a5, long nr, const void *caller)
 {
     static int trace = -1;
     if (trace < 0) trace = getenv("TL_SYSCALL_TRACE") ? 1 : 0;
@@ -1493,9 +1517,20 @@ long tl_linux_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long
     bool waiting = nr == 98 && (cmd == 0 || cmd == 9);
     uint64_t start = waiting ? tl_wait_profile_begin() : 0;
     long r = linux_syscall_impl(a0, a1, a2, a3, a4, a5, nr);
-    if (waiting) tl_wait_profile_end("futex", __builtin_return_address(0), (void *)a0, start, (int)r);
+    if (waiting) tl_wait_profile_end("futex", caller, (void *)a0, start, (int)r);
     if (trace) tl_log_line("syscall %ld(%#lx, %#lx, %#lx) -> %ld", nr, a0, a1, a2, r);
     return r;
+}
+long tl_linux_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long nr)
+{
+    return syscall_at(a0, a1, a2, a3, a4, a5, nr, __builtin_return_address(0));
+}
+long tl_linux_syscall_svc(long a0, long a1, long a2, long a3, long a4, long a5, long nr, const uint32_t *stub_return)
+{
+    /* svc_stub returns through two loads and a branch to the instruction after svc. */
+    int32_t branch = (int32_t)(stub_return[2] << 6) >> 6;
+    const void *caller = (const void *)((uintptr_t)(stub_return + 2) + (intptr_t)branch * 4 - 4);
+    return syscall_at(a0, a1, a2, a3, a4, a5, nr, caller);
 }
 static long linux_syscall_impl(long a0, long a1, long a2, long a3, long a4, long a5, long nr)
 {
