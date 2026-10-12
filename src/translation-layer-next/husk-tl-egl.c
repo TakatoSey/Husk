@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "husk-tl-bionic.h"
 #include "husk-tl-ld.h"
@@ -450,7 +451,28 @@ static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
         fprintf(stderr, "egl: calls so far, by function: %s\n", hist);
     }
     if (E.frame_dir[0] && (n % (unsigned long)E.frame_every == 0 || n <= 3)) save_frame(d, s, n);
-    return E.frame_dir[0] ? EGL_TRUE : a_eglSwapBuffers(d, s);
+    if (E.frame_dir[0]) return EGL_TRUE;
+    static _Thread_local struct {
+        struct timespec since;
+        unsigned long samples;
+        double total_ms, max_ms;
+    } perf;
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    if (!perf.samples) perf.since = t0;
+    EGLBoolean ok = a_eglSwapBuffers(d, s);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+    perf.samples++;
+    perf.total_ms += ms;
+    if (ms > perf.max_ms) perf.max_ms = ms;
+    double elapsed = (t1.tv_sec - perf.since.tv_sec) + (t1.tv_nsec - perf.since.tv_nsec) / 1e9;
+    if (elapsed >= 3) {
+        tl_log_line("egl: perf: %.1f swaps/s, ANGLE swap %.2f ms avg / %.2f ms max",
+                    perf.samples / elapsed, perf.total_ms / perf.samples, perf.max_ms);
+        perf.samples = 0; perf.total_ms = 0; perf.max_ms = 0;
+    }
+    return ok;
 }
 
 /* The damage-region swaps (Flutter's engine, HWUI): the same as a whole swap here -- through the wrapper, so a frame reaches the
