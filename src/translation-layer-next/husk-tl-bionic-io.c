@@ -1521,9 +1521,9 @@ static long syscall_at(long a0, long a1, long a2, long a3, long a4, long a5, lon
     if (trace) tl_log_line("syscall %ld(%#lx, %#lx, %#lx) -> %ld", nr, a0, a1, a2, r);
     return r;
 }
-long tl_linux_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long nr)
+long tl_linux_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long nr, const void *caller)
 {
-    return syscall_at(a0, a1, a2, a3, a4, a5, nr, __builtin_return_address(0));
+    return syscall_at(a0, a1, a2, a3, a4, a5, nr, caller);
 }
 long tl_linux_syscall_svc(long a0, long a1, long a2, long a3, long a4, long a5, long nr, const uint32_t *stub_return)
 {

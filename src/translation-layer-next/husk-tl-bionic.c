@@ -588,12 +588,12 @@ static int bionic_prctl(int option, unsigned long a2, unsigned long a3, unsigned
     }
 }
 
-long tl_linux_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long nr);
+long tl_linux_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long nr, const void *caller);
 
 static long bionic_syscall(long num, long a1, long a2, long a3, long a4, long a5, long a6)
 {
     (void)a6;
-    long r = tl_linux_syscall(a1, a2, a3, a4, a5, a6, num);
+    long r = tl_linux_syscall(a1, a2, a3, a4, a5, a6, num, __builtin_return_address(0));
     if (r < 0 && r > -4096) { tl_set_guest_errno((int)-r); return -1; }
     return r;
 }

@@ -45,6 +45,26 @@ static struct {
     pthread_mutex_t lock;
 } E = { .lock = PTHREAD_MUTEX_INITIALIZER };
 
+static _Thread_local struct {
+    double total_ms, max_ms;
+    unsigned long calls;
+    const char *longest;
+} gl_perf;
+
+static uint64_t gl_perf_begin(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec;
+}
+static void gl_perf_end(const char *name, uint64_t start)
+{
+    double ms = (gl_perf_begin() - start) / 1e6;
+    gl_perf.total_ms += ms;
+    gl_perf.calls++;
+    if (ms > gl_perf.max_ms) { gl_perf.max_ms = ms; gl_perf.longest = name; }
+}
+
 /* ANGLE's entry points */
 static void *(*a_eglGetProcAddress)(const char *);
 static EGLDisplay (*a_eglGetPlatformDisplayEXT)(EGLenum, void *, const EGLint *);
@@ -217,7 +237,13 @@ static EGLBoolean w_eglMakeCurrent(EGLDisplay d, EGLSurface dr, EGLSurface rd, E
 }
 PASS_BOOL(eglSwapInterval, (EGLDisplay d, EGLint i), (d, i))
 PASS_BOOL(eglBindAPI, (EGLenum api), (api))
-PASS_BOOL(eglWaitGL, (void), ())
+static EGLBoolean w_eglWaitGL(void)
+{
+    uint64_t start = gl_perf_begin();
+    EGLBoolean result = a_eglWaitGL();
+    gl_perf_end("eglWaitGL", start);
+    return result;
+}
 PASS_BOOL(eglWaitNative, (EGLint e), (e))
 PASS_BOOL(eglReleaseThread, (void), ())
 
@@ -453,13 +479,23 @@ static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
     if (E.frame_dir[0] && (n % (unsigned long)E.frame_every == 0 || n <= 3)) save_frame(d, s, n);
     if (E.frame_dir[0]) return EGL_TRUE;
     static _Thread_local struct {
-        struct timespec since;
+        struct timespec since, cpu_since;
         unsigned long samples;
         double total_ms, max_ms;
+        bool initialized;
     } perf;
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    if (!perf.samples) perf.since = t0;
+    if (!perf.initialized) {
+        char thread[32] = "";
+        pthread_getname_np(pthread_self(), thread, sizeof(thread));
+        if (!strncmp(thread, "UnityGfxDevice", 14)) tl_wait_profile_enable();
+        perf.initialized = true;
+    }
+    if (!perf.samples) {
+        perf.since = t0;
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &perf.cpu_since);
+    }
     EGLBoolean ok = a_eglSwapBuffers(d, s);
     clock_gettime(CLOCK_MONOTONIC, &t1);
     double ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
@@ -470,6 +506,13 @@ static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
     if (elapsed >= 3) {
         tl_log_line("egl: perf: %.1f swaps/s, ANGLE swap %.2f ms avg / %.2f ms max",
                     perf.samples / elapsed, perf.total_ms / perf.samples, perf.max_ms);
+        struct timespec cpu;
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu);
+        double cpu_ms = (cpu.tv_sec - perf.cpu_since.tv_sec) * 1000.0 + (cpu.tv_nsec - perf.cpu_since.tv_nsec) / 1e6;
+        tl_log_line("egl: work: render-thread CPU %.2f ms/swap, tracked GL %.2f ms/swap (%lu calls), longest %s %.2f ms",
+                    cpu_ms / perf.samples, gl_perf.total_ms / perf.samples, gl_perf.calls,
+                    gl_perf.longest ? gl_perf.longest : "none", gl_perf.max_ms);
+        gl_perf.total_ms = 0; gl_perf.max_ms = 0; gl_perf.calls = 0; gl_perf.longest = NULL;
         perf.samples = 0; perf.total_ms = 0; perf.max_ms = 0;
     }
     return ok;
@@ -635,7 +678,10 @@ static EGLint w_eglClientWaitSyncKHR(EGLDisplay d, void *s, EGLint f, uint64_t t
 {
     if (!s) return EGL_FALSE;
     if (!a_eglGetCurrentContext()) return 0x30F6;                   /* EGL_CONDITION_SATISFIED_KHR */
-    return r_eglClientWaitSyncKHR(d, s, f, t);
+    uint64_t start = gl_perf_begin();
+    EGLint result = r_eglClientWaitSyncKHR(d, s, f, t);
+    gl_perf_end("eglClientWaitSyncKHR", start);
+    return result;
 }
 static EGLBoolean w_eglDestroySyncKHR(EGLDisplay d, void *s) { return s ? r_eglDestroySyncKHR(d, s) : EGL_FALSE; }
 static EGLBoolean w_eglGetSyncAttribKHR(EGLDisplay d, void *s, EGLint a, EGLint *v) { return s ? r_eglGetSyncAttribKHR(d, s, a, v) : EGL_FALSE; }
@@ -643,12 +689,44 @@ static EGLint w_eglClientWaitSync(EGLDisplay d, void *s, EGLint f, uint64_t t)
 {
     if (!s) return EGL_FALSE;
     if (!a_eglGetCurrentContext()) return 0x30F6;
-    return r_eglClientWaitSync(d, s, f, t);
+    uint64_t start = gl_perf_begin();
+    EGLint result = r_eglClientWaitSync(d, s, f, t);
+    gl_perf_end("eglClientWaitSync", start);
+    return result;
 }
 static EGLBoolean w_eglDestroySync(EGLDisplay d, void *s) { return s ? r_eglDestroySync(d, s) : EGL_FALSE; }
 
+#define GL_TIMED_VOID(name, params, args) \
+    static void (*r_##name) params; \
+    static void w_##name params { uint64_t start = gl_perf_begin(); r_##name args; gl_perf_end(#name, start); }
+#define GL_TIMED_RETURN(type, name, params, args) \
+    static type (*r_##name) params; \
+    static type w_##name params { uint64_t start = gl_perf_begin(); type result = r_##name args; gl_perf_end(#name, start); return result; }
+
+GL_TIMED_VOID(glFinish, (void), ())
+GL_TIMED_VOID(glFlush, (void), ())
+GL_TIMED_VOID(glWaitSync, (void *sync, unsigned flags, uint64_t timeout), (sync, flags, timeout))
+GL_TIMED_RETURN(unsigned, glClientWaitSync, (void *sync, unsigned flags, uint64_t timeout), (sync, flags, timeout))
+GL_TIMED_RETURN(void *, glMapBufferRange, (unsigned target, long offset, long length, unsigned access), (target, offset, length, access))
+GL_TIMED_RETURN(void *, glMapBufferOES, (unsigned target, unsigned access), (target, access))
+GL_TIMED_VOID(glReadPixels, (int x, int y, int w, int h, unsigned format, unsigned type, void *pixels), (x, y, w, h, format, type, pixels))
+GL_TIMED_VOID(glDrawArrays, (unsigned mode, int first, int count), (mode, first, count))
+GL_TIMED_VOID(glDrawElements, (unsigned mode, int count, unsigned type, const void *indices), (mode, count, type, indices))
+GL_TIMED_VOID(glDrawArraysInstanced, (unsigned mode, int first, int count, int instances), (mode, first, count, instances))
+GL_TIMED_VOID(glDrawElementsInstanced, (unsigned mode, int count, unsigned type, const void *indices, int instances), (mode, count, type, indices, instances))
+GL_TIMED_VOID(glDrawElementsBaseVertex, (unsigned mode, int count, unsigned type, const void *indices, int base), (mode, count, type, indices, base))
+GL_TIMED_VOID(glDrawElementsInstancedBaseVertex, (unsigned mode, int count, unsigned type, const void *indices, int instances, int base), (mode, count, type, indices, instances, base))
+GL_TIMED_VOID(glGetQueryObjectuiv, (unsigned query, unsigned pname, unsigned *value), (query, pname, value))
+GL_TIMED_VOID(glTexImage2D, (unsigned target, int level, int internal, int w, int h, int border, unsigned format, unsigned type, const void *pixels), (target, level, internal, w, h, border, format, type, pixels))
+GL_TIMED_VOID(glTexSubImage2D, (unsigned target, int level, int x, int y, int w, int h, unsigned format, unsigned type, const void *pixels), (target, level, x, y, w, h, format, type, pixels))
+#undef GL_TIMED_VOID
+#undef GL_TIMED_RETURN
+
 #define ADAPT(name) { #name, (void *)w_##name, (void **)&r_##name }
 static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
+    ADAPT(glFinish), ADAPT(glFlush), ADAPT(glWaitSync), ADAPT(glClientWaitSync), ADAPT(glMapBufferRange), ADAPT(glMapBufferOES), ADAPT(glReadPixels),
+    ADAPT(glDrawArrays), ADAPT(glDrawElements), ADAPT(glDrawArraysInstanced), ADAPT(glDrawElementsInstanced),
+    ADAPT(glDrawElementsBaseVertex), ADAPT(glDrawElementsInstancedBaseVertex), ADAPT(glGetQueryObjectuiv), ADAPT(glTexImage2D), ADAPT(glTexSubImage2D),
     ADAPT(glBlitFramebuffer), ADAPT(glTexSubImage3D), ADAPT(glCompressedTexSubImage3D), ADAPT(glCopyImageSubData),
     ADAPT(glColorMask), ADAPT(glDepthMask), ADAPT(glVertexAttribPointer), ADAPT(glUniformMatrix2fv),
     ADAPT(glUniformMatrix3fv), ADAPT(glUniformMatrix4fv), ADAPT(glSampleCoverage), ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),

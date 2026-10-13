@@ -91,8 +91,10 @@ void tl_wait_profile_end(const char *kind, const void *caller, const void *objec
     if (wait_perf.longest >= 10000000ull) {
         tl_lib *lib = tl_ld_lib_of(wait_perf.caller);
         uintptr_t offset = lib ? (uintptr_t)wait_perf.caller - (uintptr_t)tl_ld_lib_base(lib) : 0;
-        tl_log_line("unity: waits: %.1f ms across %lu calls in %.2f s; longest %s %.2f ms, result %d, object %p, caller %s+%#lx",
-                    wait_perf.total / 1e6, wait_perf.count, (now - wait_perf.since) / 1e9,
+        char thread[32] = "";
+        pthread_getname_np(pthread_self(), thread, sizeof(thread));
+        tl_log_line("unity: waits: thread '%s', %.1f ms across %lu calls in %.2f s; longest %s %.2f ms, result %d, object %p, caller %s+%#lx",
+                    thread, wait_perf.total / 1e6, wait_perf.count, (now - wait_perf.since) / 1e9,
                     wait_perf.kind, wait_perf.longest / 1e6, wait_perf.result, wait_perf.object,
                     lib ? tl_ld_lib_name(lib) : "host", (unsigned long)offset);
     }
